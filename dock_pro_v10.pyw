@@ -213,7 +213,6 @@ def _mk_guid(s):
         g.Data4[i] = b
     return g
 
-IID_ISHELLFOLDER = "{000214E6-0000-0000-C000-000000000046}"
 IID_IEXTRACTICONW = "{000214FA-0000-0000-C000-000000000046}"
 
 def _hicon_to_image(hicon):
@@ -424,7 +423,7 @@ def _iextract_icon_image(path: str, size: int):
             pidl_arr = (ctypes.c_void_p * 1)(pidl)
             iex = ctypes.c_void_p()
             hr = GetUIObjectOf(pDesk, None, 1, ctypes.cast(pidl_arr, ctypes.c_void_p),
-                               ctypes.byref(_mk_guid(IID_IEXTRACTICONW)), None, ctypes.byref(iex))
+                               ctypes.byref(iguid), None, ctypes.byref(iex))
             if hr != 0 or not iex:
                 _log(f"_iextract_icon_image: GetUIObjectOf(IExtractIconW) failed hr={hr} {path!r}")
                 return None
