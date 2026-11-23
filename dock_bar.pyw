@@ -18,6 +18,7 @@
 import os
 import sys
 import json
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -42,12 +43,18 @@ from PySide6.QtWidgets import (
 # ---------------------------------------------------------------------------
 _DEBUG = os.environ.get("DOCK_BAR_DEBUG", "") == "1"
 
+import time
+
 def _log(msg: str) -> None:
-    if _DEBUG:
-        try:
-            print(f"[dock-bar] {msg}", file=sys.stderr, flush=True)
-        except Exception:
-            pass
+    if not _DEBUG: return
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    try:
+        with open(CONFIG_PATH.parent / "dock_debug.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception: pass
+    try:
+        print(f"[dock-bar] {line}", file=sys.stderr, flush=True)
+    except Exception: pass
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -366,6 +373,7 @@ def _icon_from_file(path: str, size: int, index: int = 0):
 def extract_icon_for_path(path: str, size: int = 64) -> QPixmap:
     path = _expand(str(path))
     is_lnk = path.lower().endswith(".lnk")
+    _log(f"extract: {path!r} size={size}")
     target, icon_path, icon_index = "", "", 0
     
     if is_lnk:
@@ -469,6 +477,7 @@ class DockButton(QWidget):
             try:
                 self._pixmap = extract_icon_for_path(self.item.path, max(icon_size * 2, 96))
             except Exception:
+                _log(f"extract failed for {self.item.path!r}:\n{traceback.format_exc()}")
                 self._pixmap = QPixmap(icon_size, icon_size)
                 
         pad = self.dock_bar.config.get("bar_padding", 12)
@@ -654,6 +663,7 @@ class DockBar(QWidget):
         except Exception: pass
 
     def _rebuild(self) -> None:
+        _log(f"rebuild start: {len(self.items)} items")
         while self._layout.count():
             it = self._layout.takeAt(0)
             w = it.widget()
@@ -661,6 +671,7 @@ class DockBar(QWidget):
                 w.setParent(None)
                 w.deleteLater()
         self.buttons = []
+        self._build_failures = 0
 
         if self.config["orientation"] == "horizontal":
             self._layout.setDirection(QBoxLayout.LeftToRight)
@@ -671,13 +682,35 @@ class DockBar(QWidget):
         self._layout.setContentsMargins(6, 6, 6, 6)
 
         for item in self.items:
-            btn = DockButton(item, self)
+            try:
+                btn = DockButton(item, self)
+            except Exception:
+                _log(f"rebuild: DockButton failed for {item.path!r}:\n{traceback.format_exc()}")
+                self._build_failures += 1
+                btn = self._make_placeholder()
             self.buttons.append(btn)
             self._layout.addWidget(btn)
 
         self._layout.activate()
         self.adjustSize()
         self.resize(self.sizeHint())
+        _log(f"rebuild done: {len(self.buttons)}/{len(self.items)} buttons, failures={self._build_failures}")
+
+        if self._build_failures > 0 and self._build_failures == len(self.items) and not getattr(self, "_retry_pending", False):
+            self._retry_pending = True
+            _log("rebuild: all buttons failed, retrying once after 400ms")
+            QTimer.singleShot(400, self._rebuild_retry)
+
+    def _rebuild_retry(self) -> None:
+        self._retry_pending = False
+        self._rebuild()
+
+    def _make_placeholder(self) -> QWidget:
+        w = QWidget(self)
+        pad = self.config.get("bar_padding", 12)
+        side = self.config["icon_size"] + pad * 2
+        w.setFixedSize(side, side)
+        return w
 
     def _apply_config(self, full: bool = False) -> None:
         self.setWindowOpacity(max(0.15, min(1.0, self.config["opacity"])))
@@ -688,7 +721,9 @@ class DockBar(QWidget):
         else:
             self._layout.setDirection(QBoxLayout.TopToBottom)
 
-        for b in self.buttons: b._update_size()
+        for b in self.buttons:
+            try: b._update_size()
+            except Exception: _log(f"_update_size failed on button:\n{traceback.format_exc()}")
 
         flags = Qt.FramelessWindowHint | Qt.Tool
         if self.config["always_on_top"]: flags |= Qt.WindowStaysOnTopHint
@@ -883,6 +918,7 @@ class DockBar(QWidget):
             return QPoint(0, self.buttons[-1].geometry().bottom() + spacing // 2 + 1)
 
     def _handle_drag_enter(self, event, source: QWidget) -> None:
+        _log(f"drag enter: source={type(source).__name__} urls={event.mimeData().hasUrls()} internal={event.mimeData().hasFormat(MIME_INTERNAL)}")
         if self._is_acceptable(event.mimeData()):
             event.acceptProposedAction()
             self._drop_index = self._compute_drop_index(self._map_to_dock(event, source))
@@ -898,6 +934,7 @@ class DockBar(QWidget):
         pos = self._map_to_dock(event, source)
         mime = event.mimeData()
         target = self._compute_drop_index(pos)
+        _log(f"drop: source={type(source).__name__} n_urls={len(mime.urls())} internal={mime.hasFormat(MIME_INTERNAL)} target={target}")
         if mime.hasFormat(MIME_INTERNAL):
             try: src_idx = int(bytes(mime.data(MIME_INTERNAL)).decode("utf-8"))
             except Exception: src_idx = -1
@@ -906,6 +943,7 @@ class DockBar(QWidget):
             added = False
             for url in mime.urls():
                 path = url.toLocalFile()
+                _log(f"drop url: {path!r}")
                 if path:
                     try:
                         path = os.path.abspath(path)
@@ -922,7 +960,10 @@ class DockBar(QWidget):
                         pass
             if added:
                 self._save()
+                _log("drop: items added, saving + scheduling rebuild")
                 QTimer.singleShot(10, self._rebuild)
+            else:
+                _log("drop: nothing added (all urls empty / missing / duplicates)")
         self._drop_index = -1
         self.update()
         event.acceptProposedAction()
