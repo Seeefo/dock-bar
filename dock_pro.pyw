@@ -1249,7 +1249,26 @@ class TrayIcon(QSystemTrayIcon):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def _install_crash_hook() -> None:
+    import traceback as _tb
+
+    def _hook(etype, value, tb):
+        text = "".join(_tb.format_exception(etype, value, tb))
+        try:
+            with open(APP_DIR / "dock_pro_debug.log", "a", encoding="utf-8") as f:
+                f.write("\n=== CRASH ===\n" + text)
+        except Exception: pass
+        try:
+            from PySide6.QtWidgets import QApplication as _A, QMessageBox as _M
+            app = _A.instance()
+            if app is not None:
+                _M.critical(None, "DockPro Error", text[-3000:])
+        except Exception: pass
+
+    sys.excepthook = _hook
+
 def main() -> int:
+    _install_crash_hook()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)
@@ -1267,4 +1286,19 @@ def main() -> int:
     return app.exec()
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        text = traceback.format_exc()
+        try:
+            with open(APP_DIR / "dock_pro_debug.log", "a", encoding="utf-8") as f:
+                f.write("\n=== FATAL ===\n" + text)
+        except Exception: pass
+        try:
+            from PySide6.QtWidgets import QApplication as _A, QMessageBox as _M
+            app = _A.instance() or _A(sys.argv)
+            _M.critical(None, "DockPro Fatal Error", text[-3000:])
+        except Exception: pass
+        sys.exit(1)
