@@ -438,8 +438,8 @@ def _hbitmap_to_image(hbm):
             return None
         data = bytearray(buf)
         if not any(data[3::4]):
-            for i in range(3, len(data), 4):
-                data[i] = 255
+            _log(f"_hbitmap_to_image: no alpha, rejected {w}x{h}")
+            return None
         img = QImage(bytes(data), w, h, stride, QImage.Format_ARGB32).copy()
         return None if img.isNull() else img
     except Exception as e:
