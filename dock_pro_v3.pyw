@@ -195,6 +195,115 @@ SHGFI_LARGEICON    = 0x000000000
 SHGFI_SMALLICON    = 0x000000001
 SHGFI_ICONLOCATION = 0x000000400
 
+def _hicon_to_image(hicon):
+    try:
+        from ctypes import wintypes
+
+        class ICONINFO(ctypes.Structure):
+            _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD),
+                        ("yHotspot", wintypes.DWORD), ("hbmMask", wintypes.HBITMAP),
+                        ("hbmColor", wintypes.HBITMAP)]
+
+        class BITMAP(ctypes.Structure):
+            _fields_ = [("bmType", ctypes.c_long), ("bmWidth", ctypes.c_long),
+                        ("bmHeight", ctypes.c_long), ("bmWidthBytes", ctypes.c_long),
+                        ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
+                        ("bmBits", ctypes.c_void_p)]
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long),
+                        ("biHeight", ctypes.c_long), ("biPlanes", wintypes.WORD),
+                        ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                        ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", ctypes.c_long),
+                        ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wintypes.DWORD),
+                        ("biClrImportant", wintypes.DWORD)]
+
+        class BITMAPINFO(ctypes.Structure):
+            _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_ubyte * 256)]
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        gdi32.CreateCompatibleDC.restype = wintypes.HDC
+        gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+        gdi32.GetObjectW.restype = ctypes.c_int
+        gdi32.GetObjectW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
+        gdi32.GetDIBits.restype = ctypes.c_int
+        gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+                                    ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+        gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+        gdi32.DeleteDC.argtypes = [wintypes.HDC]
+        user32.GetIconInfo.restype = wintypes.BOOL
+        user32.GetIconInfo.argtypes = [wintypes.HICON, ctypes.POINTER(ICONINFO)]
+
+        info = ICONINFO()
+        if not user32.GetIconInfo(wintypes.HICON(hicon), ctypes.byref(info)):
+            return None
+        try:
+            bm = BITMAP()
+            w = h = 0
+            if info.hbmColor and gdi32.GetObjectW(wintypes.HBITMAP(info.hbmColor),
+                                                  ctypes.sizeof(BITMAP), ctypes.byref(bm)):
+                w, h = bm.bmWidth, bm.bmHeight
+            if w <= 0 or w > 512 or h <= 0 or h > 512:
+                return None
+            stride = w * 4
+            buf = (ctypes.c_ubyte * (stride * h))()
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = w
+            bmi.bmiHeader.biHeight = -h
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0
+            dc = gdi32.CreateCompatibleDC(None)
+            lines = gdi32.GetDIBits(dc, wintypes.HBITMAP(info.hbmColor), 0, h,
+                                    buf, ctypes.byref(bmi), 0)
+            gdi32.DeleteDC(dc)
+            if lines != h:
+                return None
+            data = bytearray(buf)
+            if not any(data[3::4]):
+                mstride = ((w + 31) // 32) * 4
+                mbuf = (ctypes.c_ubyte * (mstride * h))()
+                bmi2 = BITMAPINFO()
+                bmi2.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+                bmi2.bmiHeader.biWidth = w
+                bmi2.bmiHeader.biHeight = -h
+                bmi2.bmiHeader.biPlanes = 1
+                bmi2.bmiHeader.biBitCount = 1
+                bmi2.bmiHeader.biCompression = 0
+                dc = gdi32.CreateCompatibleDC(None)
+                mlines = gdi32.GetDIBits(dc, wintypes.HBITMAP(info.hbmMask), 0, h,
+                                         mbuf, ctypes.byref(bmi2), 0)
+                gdi32.DeleteDC(dc)
+                if mlines == h:
+                    mask = bytes(mbuf)
+                    for y in range(h):
+                        row = mask[y * mstride:(y + 1) * mstride]
+                        base = y * stride + 3
+                        for x in range(w):
+                            a = (row[x >> 3] >> (7 - (x & 7))) & 1
+                            data[base + x * 4] = 0 if a else 255
+                else:
+                    for i in range(3, len(data), 4):
+                        data[i] = 255
+            img = QImage(bytes(data), w, h, stride, QImage.Format_ARGB32).copy()
+            return None if img.isNull() else img
+        finally:
+            gdi32.DeleteObject(wintypes.HBITMAP(info.hbmMask))
+            if info.hbmColor:
+                gdi32.DeleteObject(wintypes.HBITMAP(info.hbmColor))
+    except Exception as e:
+        _log(f"_hicon_to_image error: {e}")
+        return None
+
+def _fix_img(img, size):
+    if img is None or img.isNull(): return None
+    i = img.convertToFormat(QImage.Format_ARGB32)
+    if i.width() == size and i.height() == size: return i
+    return i.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
 def _extract_from_file(path: str, size: int, index: int = 0):
     try:
         from ctypes import wintypes
@@ -211,11 +320,11 @@ def _extract_from_file(path: str, size: int, index: int = 0):
             hicon = large.value or small.value
         if not hicon: return None
         try:
-            img = QImage.fromWinHICON(hicon)
-            return None if img.isNull() else img
+            return _fix_img(_hicon_to_image(hicon), size)
         finally:
             user32.DestroyIcon(hicon)
-    except Exception:
+    except Exception as e:
+        _log(f"_extract_from_file error {path!r}: {e}")
         return None
 
 class _SHFILEINFO(ctypes.Structure):
@@ -253,8 +362,7 @@ def _shell_small_icon(path: str, size: int):
         res, info = _shgetfileinfo(path, flags)
         if not res or not info.hIcon: return None
         try:
-            img = QImage.fromWinHICON(info.hIcon)
-            return None if img.isNull() else img
+            return _fix_img(_hicon_to_image(info.hIcon), size)
         finally:
             ctypes.windll.user32.DestroyIcon(info.hIcon)
     except Exception:
@@ -342,6 +450,7 @@ class _IconJob(QRunnable):
         except Exception as e:
             _log(f"icon job error {self.path!r}: {e}")
         finally:
+            _log(f"icon {self.path!r} size={self.size} -> {'ok' if img is not None and not img.isNull() else 'NONE'}")
             try: ICON_BUS.got.emit(self.path, self.size, img or QImage())
             except Exception: pass
             if _IS_WIN:
