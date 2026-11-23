@@ -25,7 +25,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import (
-    Qt, QSize, QPoint, QRect, QRectF, QMimeData,
+    Qt, QPoint, QRect, QRectF, QMimeData,
     Property, QTimer, QObject, Signal, QRunnable, QThreadPool,
 )
 from PySide6.QtGui import (
