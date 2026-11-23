@@ -148,16 +148,19 @@ def resolve_lnk(path: str, _depth: int = 0):
         try:
             ole32.CoInitialize(None)
             if ole32.CoCreateInstance(ctypes.byref(CLSID_ShellLink), None, 1, ctypes.byref(IID_IShellLinkW), ctypes.byref(pShellLink)) != 0:
+                _log(f"resolve_lnk: CoCreateInstance failed {path!r}")
                 return "", "", 0
 
             vtable = ctypes.cast(pShellLink, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
             QI = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p))(vtable[0][0])
             if QI(pShellLink, ctypes.byref(IID_IPersistFile), ctypes.byref(pPersistFile)) != 0:
+                _log(f"resolve_lnk: QI(IPersistFile) failed {path!r}")
                 return "", "", 0
 
             vtable_pf = ctypes.cast(pPersistFile, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
             Load = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, wintypes.DWORD)(vtable_pf[0][5])
             if Load(pPersistFile, str(path), 0) != 0:
+                _log(f"resolve_lnk: IPersistFile Load failed {path!r}")
                 return "", "", 0
 
             vtable_sl = ctypes.cast(pShellLink, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
@@ -165,8 +168,10 @@ def resolve_lnk(path: str, _depth: int = 0):
             # ..., SetIconLocation=17, GetIconLocation=18
             GetPath = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)(vtable_sl[0][4])
             tb = ctypes.create_unicode_buffer(1024)
-            GetPath(pShellLink, tb, 1024, None, 0)
+            gp_hr = GetPath(pShellLink, tb, 1024, None, 0)
             target = _expand(tb.value)
+            if not target:
+                _log(f"resolve_lnk: GetPath hr={gp_hr} empty target {path!r}")
 
             GetIconLocation = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int))(vtable_sl[0][18])
             ib = ctypes.create_unicode_buffer(1024)
@@ -392,11 +397,12 @@ def _iextract_icon_image(path: str, size: int):
     iex = None
     try:
         from ctypes import wintypes
-        ole32 = ctypes.windll.ole32
+        shell32 = ctypes.windll.shell32
         user32 = ctypes.windll.user32
 
         pDesk = ctypes.c_void_p()
-        if ole32.SHGetDesktopFolder(ctypes.byref(pDesk)) != 0 or not pDesk:
+        if shell32.SHGetDesktopFolder(ctypes.byref(pDesk)) != 0 or not pDesk:
+            _log("_iextract_icon_image: SHGetDesktopFolder failed")
             return None
         pidl = ctypes.c_void_p()
         try:
@@ -408,6 +414,7 @@ def _iextract_icon_image(path: str, size: int):
             attr = wintypes.ULONG(0)
             if ParseDisplayName(pDesk, None, None, str(path), ctypes.byref(attr),
                                 ctypes.byref(pidl)) != 0 or not pidl:
+                _log(f"_iextract_icon_image: ParseDisplayName failed {path!r}")
                 return None
             iguid = _mk_guid(IID_IEXTRACTICONW)
             GetUIObjectOf = ctypes.WINFUNCTYPE(
@@ -419,6 +426,7 @@ def _iextract_icon_image(path: str, size: int):
             hr = GetUIObjectOf(pDesk, None, 1, ctypes.cast(pidl_arr, ctypes.c_void_p),
                                ctypes.byref(_mk_guid(IID_IEXTRACTICONW)), None, ctypes.byref(iex))
             if hr != 0 or not iex:
+                _log(f"_iextract_icon_image: GetUIObjectOf(IExtractIconW) failed hr={hr} {path!r}")
                 return None
             try:
                 vte = ctypes.cast(iex, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
@@ -430,7 +438,9 @@ def _iextract_icon_image(path: str, size: int):
                 idx = ctypes.c_int(0)
                 fl = ctypes.c_uint(0)
                 if GetIconLocation(iex, 0, loc_buf, 1024, ctypes.byref(idx), ctypes.byref(fl)) != 0:
+                    _log(f"_iextract_icon_image: GetIconLocation failed {path!r}")
                     return None
+                _log(f"_iextract_icon_image: loc={loc_buf.value!r} idx={idx.value} flags={fl.value:#x} {path!r}")
                 if fl.value & GIL_NOTFILENAME:
                     Extract = ctypes.WINFUNCTYPE(
                         ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int,
@@ -441,9 +451,12 @@ def _iextract_icon_image(path: str, size: int):
                     nsize = (size & 0xFFFF) | ((size & 0xFFFF) << 16)
                     if Extract(iex, loc_buf.value, idx.value, ctypes.byref(large),
                                ctypes.byref(small), nsize) != 0:
+                        _log(f"_iextract_icon_image: Extract failed {path!r}")
                         return None
                     hicon = large.value or small.value
-                    if not hicon: return None
+                    if not hicon:
+                        _log(f"_iextract_icon_image: Extract returned no icon {path!r}")
+                        return None
                     try:
                         return _fix_img(_hicon_to_image(hicon), size)
                     finally:
@@ -527,6 +540,11 @@ def _extract_icon_src(path: str, size: int):
         if target and os.path.exists(target):
             img = _extract_from_file(target, size, 0)
             if img is not None and not img.isNull(): return img, "target-extract"
+
+        # Absolute last resort so the dock never falls back to letter
+        # placeholders; carries the small arrow overlay (tag shows it).
+        img = _shell_small_icon(path, size)
+        if img is not None and not img.isNull(): return img, "lnk-arrow-last-resort"
     else:
         if os.path.isdir(path):
             img = _type_icon_by_location(path, size)
