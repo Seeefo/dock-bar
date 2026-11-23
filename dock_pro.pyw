@@ -701,8 +701,8 @@ class DockBar(QWidget):
     def remove_item(self, item: DockItem) -> None:
         if item in self.items:
             self.items.remove(item)
-            self._rebuild()
             self._save()
+            self._rebuild_soon()
 
     def add_item(self, path: str, index: int = None) -> bool:
         try: path = os.path.abspath(path)
@@ -711,10 +711,12 @@ class DockBar(QWidget):
         norm = os.path.normcase(path)
         if any(os.path.normcase(it.path) == norm for it in self.items): return False
         item = DockItem(path)
-        if index is None or index < 0 or index > len(self.items): self.items.append(item)
-        else: self.items.insert(index, item)
-        self._rebuild()
+        if index is None or index < 0 or index > len(self.items):
+            self.items.append(item)
+        else:
+            self.items.insert(index, item)
         self._save()
+        self._rebuild_soon()
         return True
 
     def move_item(self, src: int, dst: int) -> None:
@@ -724,8 +726,8 @@ class DockBar(QWidget):
         item = self.items.pop(src)
         if dst > src: dst -= 1
         self.items.insert(dst, item)
-        self._rebuild()
         self._save()
+        self._rebuild_soon()
 
     def _save(self) -> None:
         self.config["items"] = [it.to_dict() for it in self.items]
@@ -738,7 +740,6 @@ class DockBar(QWidget):
             it = self._layout.takeAt(0)
             w = it.widget()
             if w is not None:
-                w.setParent(None)
                 w.deleteLater()
         self.buttons = []
 
@@ -777,8 +778,19 @@ class DockBar(QWidget):
         self.adjustSize()
         self.resize(self.sizeHint())
 
-    def _refresh_sizes(self) -> None:
+    def _rebuild_soon(self) -> None:
+        # NEVER rebuild synchronously inside a drop/mouse event: the receiving
+        # widget must survive its own event first.
+        if getattr(self, "_rebuild_pending", False): return
+        self._rebuild_pending = True
+        QTimer.singleShot(0, self._rebuild_now)
+
+    def _rebuild_now(self) -> None:
+        self._rebuild_pending = False
         self._rebuild()
+
+    def _refresh_sizes(self) -> None:
+        self._rebuild_soon()
 
     def _apply_flags(self) -> None:
         self.setWindowOpacity(max(0.15, min(1.0, self.config["opacity"])))
@@ -896,8 +908,8 @@ class DockBar(QWidget):
 
     def _toggle_orientation(self) -> None:
         self.config["orientation"] = "vertical" if self.config["orientation"] == "horizontal" else "horizontal"
-        self._rebuild()
         self._save()
+        self._rebuild_now()
         self._restore_position()
 
     def _toggle_lock(self) -> None:
@@ -991,8 +1003,6 @@ class DockBar(QWidget):
                     target += 1
                     added += 1
             _log(f"drop: {added} item(s) added from {len(mime.urls())} urls")
-            if added:
-                write_config(self.config)
         self._drop_index = -1
         self.update()
         event.acceptProposedAction()
@@ -1157,8 +1167,8 @@ class SettingsDialog(QDialog):
         if 0 <= row < len(self.dock_bar.items) and 0 <= new_row < len(self.dock_bar.items):
             items = self.dock_bar.items
             items[row], items[new_row] = items[new_row], items[row]
-            self.dock_bar._rebuild()
             self.dock_bar._save()
+            self.dock_bar._rebuild_soon()
             self._refresh_list()
             self.list_widget.setCurrentRow(new_row)
 
