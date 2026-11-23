@@ -195,23 +195,6 @@ SHGFI_LARGEICON    = 0x000000000
 SHGFI_SMALLICON    = 0x000000001
 SHGFI_ICONLOCATION = 0x000000400
 
-SIIGBF_BIGGERSIZEOK = 0x00000001
-SIIGBF_ICONONLY     = 0x00000004
-
-def _mk_guid(s):
-    import uuid
-    class _G(ctypes.Structure):
-        _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
-                    ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
-    u = uuid.UUID(s)
-    g = _G()
-    g.Data1, g.Data2, g.Data3 = u.time_low, u.time_mid, u.time_hi_version
-    for i, b in enumerate(u.bytes[8:]):
-        g.Data4[i] = b
-    return g
-
-IID_SHELL_IMAGE_FACTORY = "{bcc18b79-ba16-442f-80c4-8a59c30c463b}"
-
 def _hicon_to_image(hicon):
     try:
         from ctypes import wintypes
@@ -385,112 +368,6 @@ def _shell_small_icon(path: str, size: int):
     except Exception:
         return None
 
-def _hbitmap_to_image(hbm):
-    try:
-        from ctypes import wintypes
-
-        class BITMAP(ctypes.Structure):
-            _fields_ = [("bmType", ctypes.c_long), ("bmWidth", ctypes.c_long),
-                        ("bmHeight", ctypes.c_long), ("bmWidthBytes", ctypes.c_long),
-                        ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
-                        ("bmBits", ctypes.c_void_p)]
-
-        class BITMAPINFOHEADER(ctypes.Structure):
-            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long),
-                        ("biHeight", ctypes.c_long), ("biPlanes", wintypes.WORD),
-                        ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
-                        ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", ctypes.c_long),
-                        ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wintypes.DWORD),
-                        ("biClrImportant", wintypes.DWORD)]
-
-        class BITMAPINFO(ctypes.Structure):
-            _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_ubyte * 256)]
-
-        gdi32 = ctypes.windll.gdi32
-        gdi32.CreateCompatibleDC.restype = wintypes.HDC
-        gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
-        gdi32.GetObjectW.restype = ctypes.c_int
-        gdi32.GetObjectW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
-        gdi32.GetDIBits.restype = ctypes.c_int
-        gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
-                                    ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
-        gdi32.DeleteDC.argtypes = [wintypes.HDC]
-
-        bm = BITMAP()
-        if not gdi32.GetObjectW(wintypes.HBITMAP(hbm), ctypes.sizeof(BITMAP), ctypes.byref(bm)):
-            return None
-        w, h = bm.bmWidth, abs(bm.bmHeight)
-        if w <= 0 or w > 1024 or h <= 0 or h > 1024:
-            return None
-        stride = w * 4
-        buf = (ctypes.c_ubyte * (stride * h))()
-        bmi = BITMAPINFO()
-        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.bmiHeader.biWidth = w
-        bmi.bmiHeader.biHeight = -h
-        bmi.bmiHeader.biPlanes = 1
-        bmi.bmiHeader.biBitCount = 32
-        bmi.bmiHeader.biCompression = 0
-        dc = gdi32.CreateCompatibleDC(None)
-        lines = gdi32.GetDIBits(dc, wintypes.HBITMAP(hbm), 0, h, buf, ctypes.byref(bmi), 0)
-        gdi32.DeleteDC(dc)
-        if lines != h:
-            return None
-        data = bytearray(buf)
-        if not any(data[3::4]):
-            _log(f"_hbitmap_to_image: no alpha, rejected {w}x{h}")
-            return None
-        img = QImage(bytes(data), w, h, stride, QImage.Format_ARGB32).copy()
-        return None if img.isNull() else img
-    except Exception as e:
-        _log(f"_hbitmap_to_image error: {e}")
-        return None
-
-def _shell_item_image(path: str, size: int):
-    """IShellItemImageFactory::GetImage with SIIGBF_ICONONLY.
-    Returns the real icon at (near-)requested size WITHOUT the shortcut
-    arrow overlay and WITHOUT thumbnail downscaling."""
-    if not _IS_WIN: return None
-    try:
-        from ctypes import wintypes
-
-        class _SIZE(ctypes.Structure):
-            _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
-
-        shell32 = ctypes.windll.shell32
-        gdi32 = ctypes.windll.gdi32
-        gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
-        shell32.SHCreateItemFromParsingName.restype = ctypes.c_long
-        shell32.SHCreateItemFromParsingName.argtypes = [
-            ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
-
-        punk = ctypes.c_void_p()
-        hr = shell32.SHCreateItemFromParsingName(
-            str(path), None, ctypes.byref(_mk_guid(IID_SHELL_IMAGE_FACTORY)), ctypes.byref(punk))
-        if hr != 0 or not punk: return None
-        try:
-            vt = ctypes.cast(punk, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
-            GetImage = ctypes.WINFUNCTYPE(
-                ctypes.c_long, ctypes.c_void_p, _SIZE, ctypes.c_uint,
-                ctypes.POINTER(wintypes.HBITMAP))(vt[0][3])
-            hbm = wintypes.HBITMAP()
-            hr = GetImage(punk, _SIZE(int(size), int(size)),
-                          SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, ctypes.byref(hbm))
-            if hr != 0 or not hbm.value: return None
-            try:
-                img = _hbitmap_to_image(hbm.value)
-            finally:
-                gdi32.DeleteObject(wintypes.HBITMAP(hbm.value))
-            if img is None or img.isNull(): return None
-            return _fix_img(img, size)
-        finally:
-            vp = ctypes.cast(punk, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
-            Release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vp[0][2])
-            Release(punk)
-    except Exception as e:
-        _log(f"_shell_item_image error {path!r}: {e}")
-        return None
-
 def _image_reader_icon(path: str, size: int):
     low = path.lower()
     if not low.endswith((".ico", ".cur", ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".svg")):
@@ -508,10 +385,22 @@ def extract_icon(path: str, size: int = 96):
     path = _expand(str(path))
     if not path or not os.path.exists(path): return None
     img = _image_reader_icon(path, size)
-    if img is not None and not img.isNull(): return img
+    if img is not None and not img.isNull():
+        _log(f"icon src for {path!r}: reader")
+        return img
 
     if not _IS_WIN: return None
 
+    img, src = _extract_icon_src(path, size)
+    if img is not None and not img.isNull():
+        _log(f"icon src for {path!r}: {src}")
+        return img
+    _log(f"icon src for {path!r}: NONE")
+    return None
+
+def _extract_icon_src(path: str, size: int):
+    """Returns (QImage | None, source_tag). Never calls SHGetFileInfoW on a
+    .lnk that would bake the shortcut arrow into the icon."""
     target, icon_loc, icon_idx = "", "", 0
     if path.lower().endswith(".lnk"):
         target, icon_loc, icon_idx = resolve_lnk(path)
@@ -520,36 +409,37 @@ def extract_icon(path: str, size: int = 96):
         if target:
             t = _expand(target)
             if os.path.isdir(t) or os.path.isfile(t):
-                img = _shell_item_image(t, size) or _type_icon_by_location(t, size)
-                if img is not None and not img.isNull(): return img
+                img = _type_icon_by_location(t, size)
+                if img is not None and not img.isNull(): return img, "target-location"
                 img = _shell_small_icon(t, size)
-                if img is not None and not img.isNull(): return img
+                if img is not None and not img.isNull(): return img, "target-shell"
 
-        # 2. Raw embedded icon of the .lnk (no overlay from SHDefExtractIconW)
+        # 2. Raw embedded icon of the .lnk (SHDefExtractIconW adds no overlay)
         if icon_loc and os.path.exists(icon_loc):
             img = _extract_from_file(icon_loc, size, icon_idx) or _type_icon_by_location(icon_loc, size)
-            if img is not None and not img.isNull(): return img
+            if img is not None and not img.isNull(): return img, "icon-location"
 
         img = _type_icon_by_location(path, size)
-        if img is not None and not img.isNull(): return img
+        if img is not None and not img.isNull(): return img, "lnk-embedded"
 
-        # 3. Modern factory with SIIGBF_ICONONLY -> icon WITHOUT shortcut arrow
-        img = _shell_item_image(path, size)
-        if img is not None and not img.isNull(): return img
-
-        # 4. Raw extraction from the target file as last resort
         if target and os.path.exists(target):
             img = _extract_from_file(target, size, 0)
-            if img is not None and not img.isNull(): return img
+            if img is not None and not img.isNull(): return img, "target-extract"
     else:
         if os.path.isdir(path):
-            img = _shell_item_image(path, size) or _type_icon_by_location(path, size) or _shell_small_icon(path, size)
+            img = _type_icon_by_location(path, size)
+            if img is not None and not img.isNull(): return img, "folder-location"
+            img = _shell_small_icon(path, size)
+            if img is not None and not img.isNull(): return img, "folder-shell"
         else:
-            img = (_extract_from_file(path, size, 0) or _type_icon_by_location(path, size)
-                   or _shell_item_image(path, size) or _shell_small_icon(path, size))
-        if img is not None and not img.isNull(): return img
+            img = _extract_from_file(path, size, 0)
+            if img is not None and not img.isNull(): return img, "file-extract"
+            img = _type_icon_by_location(path, size)
+            if img is not None and not img.isNull(): return img, "file-location"
+            img = _shell_small_icon(path, size)
+            if img is not None and not img.isNull(): return img, "file-shell"
 
-    return None
+    return None, ""
 
 # ---------------------------------------------------------------------------
 # Background icon pipeline (thread-safe UI)
