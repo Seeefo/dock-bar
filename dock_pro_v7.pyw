@@ -194,6 +194,22 @@ SHGFI_ICON         = 0x000000100
 SHGFI_LARGEICON    = 0x000000000
 SHGFI_SMALLICON    = 0x000000001
 SHGFI_ICONLOCATION = 0x000000400
+GIL_NOTFILENAME    = 0x00000008
+
+def _mk_guid(s):
+    import uuid
+    class _G(ctypes.Structure):
+        _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                    ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+    u = uuid.UUID(s)
+    g = _G()
+    g.Data1, g.Data2, g.Data3 = u.time_low, u.time_mid, u.time_hi_version
+    for i, b in enumerate(u.bytes[8:]):
+        g.Data4[i] = b
+    return g
+
+IID_ISHELLFOLDER = "{000214E6-0000-0000-C000-000000000046}"
+IID_IEXTRACTICONW = "{000214FA-0000-0000-C000-000000000046}"
 
 def _hicon_to_image(hicon):
     try:
@@ -368,6 +384,88 @@ def _shell_small_icon(path: str, size: int):
     except Exception:
         return None
 
+def _iextract_icon_image(path: str, size: int):
+    """IExtractIconW via SHGetDesktopFolder/GetUIObjectOf: the same raw icon
+    Explorer renders, BEFORE it bakes the shortcut-arrow overlay.
+    Works for .lnk, folders (desktop.ini customs) and files. No overlay."""
+    if not _IS_WIN: return None
+    iex = None
+    try:
+        from ctypes import wintypes
+        ole32 = ctypes.windll.ole32
+        user32 = ctypes.windll.user32
+
+        pDesk = ctypes.c_void_p()
+        if ole32.SHGetDesktopFolder(ctypes.byref(pDesk)) != 0 or not pDesk:
+            return None
+        pidl = ctypes.c_void_p()
+        try:
+            vt = ctypes.cast(pDesk, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
+            # IShellFolder vtable: ParseDisplayName=3, GetUIObjectOf=10
+            ParseDisplayName = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, wintypes.HWND, ctypes.c_void_p,
+                ctypes.c_wchar_p, ctypes.POINTER(wintypes.ULONG), ctypes.POINTER(ctypes.c_void_p))(vt[0][3])
+            attr = wintypes.ULONG(0)
+            if ParseDisplayName(pDesk, None, None, str(path), ctypes.byref(attr),
+                                ctypes.byref(pidl)) != 0 or not pidl:
+                return None
+            iguid = _mk_guid(IID_IEXTRACTICONW)
+            GetUIObjectOf = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, wintypes.HWND, wintypes.UINT, ctypes.c_void_p,
+                ctypes.POINTER(type(iguid)), ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p))(vt[0][10])
+            pidl_arr = (ctypes.c_void_p * 1)(pidl)
+            iex = ctypes.c_void_p()
+            hr = GetUIObjectOf(pDesk, None, 1, ctypes.cast(pidl_arr, ctypes.c_void_p),
+                               ctypes.byref(_mk_guid(IID_IEXTRACTICONW)), None, ctypes.byref(iex))
+            if hr != 0 or not iex:
+                return None
+            try:
+                vte = ctypes.cast(iex, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
+                # IExtractIconW vtable: GetIconLocation=3, Extract=4
+                GetIconLocation = ctypes.WINFUNCTYPE(
+                    ctypes.c_long, ctypes.c_void_p, wintypes.UINT, ctypes.c_wchar_p,
+                    ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint))(vte[0][3])
+                loc_buf = ctypes.create_unicode_buffer(1024)
+                idx = ctypes.c_int(0)
+                fl = ctypes.c_uint(0)
+                if GetIconLocation(iex, 0, loc_buf, 1024, ctypes.byref(idx), ctypes.byref(fl)) != 0:
+                    return None
+                if fl.value & GIL_NOTFILENAME:
+                    Extract = ctypes.WINFUNCTYPE(
+                        ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int,
+                        ctypes.POINTER(wintypes.HICON), ctypes.POINTER(wintypes.HICON),
+                        wintypes.UINT)(vte[0][4])
+                    large = wintypes.HICON()
+                    small = wintypes.HICON()
+                    nsize = (size & 0xFFFF) | ((size & 0xFFFF) << 16)
+                    if Extract(iex, loc_buf.value, idx.value, ctypes.byref(large),
+                               ctypes.byref(small), nsize) != 0:
+                        return None
+                    hicon = large.value or small.value
+                    if not hicon: return None
+                    try:
+                        return _fix_img(_hicon_to_image(hicon), size)
+                    finally:
+                        if large.value: user32.DestroyIcon(large.value)
+                        if small.value: user32.DestroyIcon(small.value)
+                loc = _expand(loc_buf.value)
+                if not loc or not os.path.exists(loc): return None
+                return _extract_from_file(loc, size, idx.value)
+            finally:
+                vte = ctypes.cast(iex, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
+                Release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vte[0][2])
+                Release(iex)
+        finally:
+            if pidl:
+                ctypes.windll.ole32.CoTaskMemFree(pidl)
+            vtd = ctypes.cast(pDesk, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
+            Release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtd[0][2])
+            Release(pDesk)
+    except Exception as e:
+        _log(f"_iextract_icon_image error {path!r}: {e}")
+        return None
+
 def _image_reader_icon(path: str, size: int):
     low = path.lower()
     if not low.endswith((".ico", ".cur", ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".svg")):
@@ -400,21 +498,25 @@ def extract_icon(path: str, size: int = 96):
 
 def _extract_icon_src(path: str, size: int):
     """Returns (QImage | None, source_tag). Never calls SHGetFileInfoW on a
-    .lnk that would bake the shortcut arrow into the icon."""
+    .lnk, which is what bakes the shortcut arrow into the icon."""
     target, icon_loc, icon_idx = "", "", 0
     if path.lower().endswith(".lnk"):
+        # 1. Explorer's own icon source for the link (raw icon, NO arrow overlay)
+        img = _iextract_icon_image(path, size)
+        if img is not None and not img.isNull(): return img, "lnk-iextract"
+
         target, icon_loc, icon_idx = resolve_lnk(path)
 
-        # 1. Target first: its own icon never carries the shortcut arrow
         if target:
             t = _expand(target)
             if os.path.isdir(t) or os.path.isfile(t):
                 img = _type_icon_by_location(t, size)
                 if img is not None and not img.isNull(): return img, "target-location"
+                img = _iextract_icon_image(t, size)
+                if img is not None and not img.isNull(): return img, "target-iextract"
                 img = _shell_small_icon(t, size)
                 if img is not None and not img.isNull(): return img, "target-shell"
 
-        # 2. Raw embedded icon of the .lnk (SHDefExtractIconW adds no overlay)
         if icon_loc and os.path.exists(icon_loc):
             img = _extract_from_file(icon_loc, size, icon_idx) or _type_icon_by_location(icon_loc, size)
             if img is not None and not img.isNull(): return img, "icon-location"
@@ -429,11 +531,15 @@ def _extract_icon_src(path: str, size: int):
         if os.path.isdir(path):
             img = _type_icon_by_location(path, size)
             if img is not None and not img.isNull(): return img, "folder-location"
+            img = _iextract_icon_image(path, size)
+            if img is not None and not img.isNull(): return img, "folder-iextract"
             img = _shell_small_icon(path, size)
             if img is not None and not img.isNull(): return img, "folder-shell"
         else:
             img = _extract_from_file(path, size, 0)
             if img is not None and not img.isNull(): return img, "file-extract"
+            img = _iextract_icon_image(path, size)
+            if img is not None and not img.isNull(): return img, "file-iextract"
             img = _type_icon_by_location(path, size)
             if img is not None and not img.isNull(): return img, "file-location"
             img = _shell_small_icon(path, size)
