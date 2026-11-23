@@ -48,12 +48,15 @@ _IS_WIN = sys.platform == "win32"
 _DEBUG = os.environ.get("DOCK_BAR_DEBUG", "") == "1"
 
 def _log(msg: str) -> None:
-    if not _DEBUG: return
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
     try:
         with open(_APP_DIR / "dock_pro_debug.log", "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception: pass
+    if _DEBUG:
+        try:
+            print(f"[dockpro] {line}", file=sys.stderr, flush=True)
+        except Exception: pass
 
 # ---------------------------------------------------------------------------
 # Constants & config
