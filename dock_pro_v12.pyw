@@ -176,11 +176,12 @@ def resolve_lnk(path: str, _depth: int = 0):
             GetIconLocation = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int))(vtable_sl[0][18])
             ib = ctypes.create_unicode_buffer(1024)
             idx = ctypes.c_int(0)
-            GetIconLocation(pShellLink, ib, 1024, ctypes.byref(idx))
+            il_hr = GetIconLocation(pShellLink, ib, 1024, ctypes.byref(idx))
             icon_path = _expand(ib.value)
             if icon_path and not os.path.isabs(icon_path):
                 icon_path = _expand(os.path.join(os.path.dirname(path), icon_path))
 
+            _log(f"resolve_lnk: {path!r} -> target={target!r} icon={icon_path!r} idx={idx.value} gp_hr={gp_hr} il_hr={il_hr}")
             return target, icon_path, idx.value
         finally:
             for ptr in (pPersistFile, pShellLink):
@@ -462,7 +463,9 @@ def _iextract_icon_image(path: str, size: int):
                         if large.value: user32.DestroyIcon(large.value)
                         if small.value: user32.DestroyIcon(small.value)
                 loc = _expand(loc_buf.value)
-                if not loc or not os.path.exists(loc): return None
+                if not loc or not os.path.exists(loc):
+                    _log(f"_iextract_icon_image: loc not usable {loc!r} {path!r}")
+                    return None
                 return _extract_from_file(loc, size, idx.value)
             finally:
                 vte = ctypes.cast(iex, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
@@ -517,15 +520,18 @@ def _extract_icon_src(path: str, size: int):
 
         # 1. Explorer queries IExtractIconW on the TARGET of the link, never on
         #    the link itself (that returns the generic class icon imageres,-109).
+        #    No local existence gate here: Explorer asks the shell namespace.
         if target:
+            img = _iextract_icon_image(target, size)
+            if img is not None and not img.isNull(): return img, "target-iextract"
             t = _expand(target)
             if os.path.isdir(t) or os.path.isfile(t):
-                img = _iextract_icon_image(t, size)
-                if img is not None and not img.isNull(): return img, "target-iextract"
                 img = _type_icon_by_location(t, size)
                 if img is not None and not img.isNull(): return img, "target-location"
                 img = _shell_small_icon(t, size)
                 if img is not None and not img.isNull(): return img, "target-shell"
+            else:
+                _log(f"target not visible from worker: {t!r} isdir={os.path.isdir(t)} isfile={os.path.isfile(t)}")
 
         if icon_loc and os.path.exists(icon_loc):
             img = _extract_from_file(icon_loc, size, icon_idx) or _type_icon_by_location(icon_loc, size)
