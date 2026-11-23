@@ -26,7 +26,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMenu, QSystemTrayIcon, QMessageBox,
     QInputDialog, QFileDialog, QDialog, QVBoxLayout, QHBoxLayout,
-    QFormLayout, QGroupBox, QSlider, QPushButton, QBoxLayout,
+    QFormLayout, QGroupBox, QSlider, QPushButton, QBoxLayout, QLayout,
     QDialogButtonBox, QColorDialog, QListWidget, QListWidgetItem,
 )
 
@@ -927,7 +927,7 @@ class DockBar(QWidget):
     def _make_row_layout(self, parent):
         lay = QBoxLayout(QBoxLayout.LeftToRight, parent)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSizeConstraint(QBoxLayout.SetFixedSize)
+        lay.setSizeConstraint(QLayout.SetFixedSize)
         return lay
 
     def _rebuild(self) -> None:
@@ -1470,14 +1470,13 @@ def main() -> int:
     app.setApplicationName("Dock Bar")
     _install_crash_hook()
     _log(f"start pid={os.getpid()} file={Path(__file__).name}")
-    _log(f"unhandled extracts in {APP_DIR}")
+    _log(f"app dir: {APP_DIR}")
 
     bar = DockBar()
     bar.show()
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = TrayIcon(bar)
         tray.show()
-        app.setAttribute(Qt.AA_DisableWindowContextHelpButton, True)
 
     return app.exec()
 
