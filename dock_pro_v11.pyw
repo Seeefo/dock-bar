@@ -513,19 +513,17 @@ def _extract_icon_src(path: str, size: int):
     .lnk, which is what bakes the shortcut arrow into the icon."""
     target, icon_loc, icon_idx = "", "", 0
     if path.lower().endswith(".lnk"):
-        # 1. Explorer's own icon source for the link (raw icon, NO arrow overlay)
-        img = _iextract_icon_image(path, size)
-        if img is not None and not img.isNull(): return img, "lnk-iextract"
-
         target, icon_loc, icon_idx = resolve_lnk(path)
 
+        # 1. Explorer queries IExtractIconW on the TARGET of the link, never on
+        #    the link itself (that returns the generic class icon imageres,-109).
         if target:
             t = _expand(target)
             if os.path.isdir(t) or os.path.isfile(t):
-                img = _type_icon_by_location(t, size)
-                if img is not None and not img.isNull(): return img, "target-location"
                 img = _iextract_icon_image(t, size)
                 if img is not None and not img.isNull(): return img, "target-iextract"
+                img = _type_icon_by_location(t, size)
+                if img is not None and not img.isNull(): return img, "target-location"
                 img = _shell_small_icon(t, size)
                 if img is not None and not img.isNull(): return img, "target-shell"
 
@@ -539,6 +537,11 @@ def _extract_icon_src(path: str, size: int):
         if target and os.path.exists(target):
             img = _extract_from_file(target, size, 0)
             if img is not None and not img.isNull(): return img, "target-extract"
+
+        # Generic class icon of the link itself (like the one Explorer uses as
+        # fallback); no arrow, no thumbnail, but not the app's real icon.
+        img = _iextract_icon_image(path, size)
+        if img is not None and not img.isNull(): return img, "lnk-iextract-class"
 
         # Clean default folder icon straight from system resources (no arrow),
         # for links whose target/icon analysis failed on this machine.
