@@ -541,6 +541,15 @@ def _extract_icon_src(path: str, size: int):
             img = _extract_from_file(target, size, 0)
             if img is not None and not img.isNull(): return img, "target-extract"
 
+        # Clean default folder icon straight from system resources (no arrow),
+        # for links whose target/icon analysis failed on this machine.
+        sysdir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+        for lib, lib_idx, tag in ((os.path.join(sysdir, "imageres.dll"), -3, "folder-default-imageres"),
+                                  (os.path.join(sysdir, "shell32.dll"), 3, "folder-default-shell32")):
+            if os.path.exists(lib):
+                img = _extract_from_file(lib, size, lib_idx)
+                if img is not None and not img.isNull(): return img, tag
+
         # Absolute last resort so the dock never falls back to letter
         # placeholders; carries the small arrow overlay (tag shows it).
         img = _shell_small_icon(path, size)
